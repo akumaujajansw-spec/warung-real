@@ -22,6 +22,7 @@ ID_MERCHANT = "179009297448"
 # Endpoint API KlikQRIS
 BASE_URL = "https://klikqris.com/api"
 CREATE_TRANSACTION_URL = f"{BASE_URL}/qris/create"
+CHECK_TRANSACTION_URL = f"{BASE_URL}/qris/check"  # Endpoint untuk cek status pembayaran
 
 # List ID 11 Grup VIP
 ALL_GROUP_IDS = [
@@ -39,14 +40,12 @@ ALL_GROUP_IDS = [
 ]
 
 bot = telebot.TeleBot(TOKEN)
-PRICE_VIP = 85000
+PRICE_VIP = 1000  # Sesuaikan harga (1000 untuk test / 85000 untuk normal)
 
 # ---------------------------------------------------------
 # HELPER UNTUK MENGHASILKAN GAMBAR QR CODE
 # ---------------------------------------------------------
 def generate_qr_stream(qr_data):
-    """Mengubah teks/string QRIS atau URL menjadi file gambar di memori (BytesIO)"""
-    # Jika dalam format base64
     if str(qr_data).startswith("data:image"):
         header, base64_str = qr_data.split(",", 1)
         image_bytes = base64.b64decode(base64_str)
@@ -54,7 +53,6 @@ def generate_qr_stream(qr_data):
         bio.name = 'qris.png'
         return bio
     
-    # Generate QR Code dari teks string/URL
     qr = qrcode.QRCode(
         version=1,
         error_correction=qrcode.constants.ERROR_CORRECT_L,
@@ -76,7 +74,7 @@ def generate_qr_stream(qr_data):
 # ---------------------------------------------------------
 def main_menu():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(KeyboardButton("🛒 Beli Paket VIP 11 Grup (Rp 85.000)"))
+    markup.add(KeyboardButton("🛒 Beli Paket VIP 11 Grup (Rp 1.000)"))
     markup.add(KeyboardButton("⭐ Testimoni"), KeyboardButton("❓ Bantuan"))
     markup.add(KeyboardButton("📞 Hubungi Admin"))
     return markup
@@ -87,13 +85,13 @@ def send_welcome(message):
     bot.reply_to(
         message, 
         "Halo! Selamat datang di bot WarungDosa.\n\n"
-        "🔥 <b>Paket Hemat:</b> Dapatkan akses ke <b>11 Grup VIP Sekaligus</b> hanya dengan <b>Rp 85.000</b>!\n\n"
+        "🔥 <b>Paket Hemat:</b> Dapatkan akses ke <b>11 Grup VIP Sekaligus</b> hanya dengan <b>Rp 1.000</b>!\n\n"
         "Silakan gunakan tombol menu di bawah untuk mulai:", 
         parse_mode="HTML", 
         reply_markup=main_menu()
     )
 
-@bot.message_handler(func=lambda message: message.text == "🛒 Beli Paket VIP 11 Grup (Rp 85.000)")
+@bot.message_handler(func=lambda message: message.text in ["🛒 Beli Paket VIP 11 Grup (Rp 1.000)", "🛒 Beli Paket VIP 11 Grup (Rp 85.000)"])
 def handle_buy_menu(message):
     chat_id = message.chat.id
     bot.send_chat_action(chat_id, 'typing')
@@ -103,7 +101,7 @@ def handle_buy_menu(message):
     
     bot.send_message(
         chat_id,
-        "Anda memilih <b>Paket VIP 11 Grup Sekaligus (Rp 85.000)</b>.\n\nKlik tombol di bawah untuk membuat QR Code pembayaran otomatis:",
+        "Anda memilih <b>Paket VIP 11 Grup Sekaligus (Rp 1.000)</b>.\n\nKlik tombol di bawah untuk membuat QR Code pembayaran otomatis:",
         parse_mode="HTML",
         reply_markup=markup
     )
@@ -142,6 +140,82 @@ def handle_contact_admin(message):
     )
 
 # ---------------------------------------------------------
+# LOOP CEK PEMBAYARAN OTOMATIS (BACKGROUND THREAD)
+# ---------------------------------------------------------
+def check_payment_loop(chat_id, order_id, photo_message_id):
+    """Mengecek status pembayaran ke KlikQRIS setiap 5 detik (Maksimal 10 menit)"""
+    timeout = 600  # Waktu tunggu 10 menit
+    start_time = time.time()
+    
+    headers = {
+        "x-api-key": API_KEY,
+        "id_merchant": ID_MERCHANT,
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "order_id": order_id,
+        "id_merchant": ID_MERCHANT
+    }
+    
+    while time.time() - start_time < timeout:
+        time.sleep(5)  # Cek setiap 5 detik
+        try:
+            res = requests.post(CHECK_TRANSACTION_URL, json=payload, headers=headers, timeout=5)
+            res_data = res.json()
+            
+            data_res = res_data.get("data", res_data)
+            status = str(data_res.get("status", "")).upper()
+            is_paid = data_res.get("paid") is True or status in ["PAID", "SUCCESS", "BERHASIL", "COMPLETED", "200"]
+            
+            if is_paid:
+                # 1. Hapus gambar QRIS yang ditampilkan sebelumnya
+                try:
+                    bot.delete_message(chat_id, photo_message_id)
+                except Exception:
+                    pass
+
+                # 2. Buat 11 link invite grup VIP (sekali pakai)
+                generated_links = []
+                for group_id in ALL_GROUP_IDS:
+                    try:
+                        invite = bot.create_chat_invite_link(chat_id=group_id, member_limit=1)
+                        generated_links.append(invite.invite_link)
+                    except Exception as e:
+                        print(f"Gagal buat link grup {group_id}: {e}")
+                
+                if generated_links:
+                    links_text = "\n".join([f"• {link}" for link in generated_links])
+                else:
+                    links_text = "Gagal membuat link otomatis. Silakan hubungi admin."
+
+                # 3. Kirim link ke pembeli
+                bot.send_message(
+                    chat_id,
+                    f"✅ <b>Pembayaran Berhasil Diterima!</b>\n\n"
+                    f"Berikut adalah link akses ke 11 Grup VIP (Sekali Pakai):\n\n{links_text}\n\n"
+                    f"<b>Catatan:</b>\n"
+                    f"- Link hanya dapat digunakan 1x per grup.\n"
+                    f"- Selamat bergabung!",
+                    parse_mode="HTML"
+                )
+                
+                # 4. Notifikasi ke Admin
+                try:
+                    bot.send_message(
+                        ADMIN_ID,
+                        f"💰 <b>Pembayaran Masuk!</b>\nUser ID: <code>{chat_id}</code>\nOrder ID: <code>{order_id}</code>",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+                
+                break  # Stop loop setelah pembayaran terverifikasi
+                
+        except Exception as e:
+            print(f"Error polling payment ({order_id}): {e}")
+
+# ---------------------------------------------------------
 # PROCESS REQUEST QRIS KE KLIKQRIS
 # ---------------------------------------------------------
 @bot.callback_query_handler(func=lambda call: call.data == "generate_qris")
@@ -174,7 +248,6 @@ def process_generate_qris(call):
         if is_success:
             data_res = res_data.get("data", res_data)
             
-            # Mendapatkan data QRIS (string/URL/base64)
             qr_content = (
                 data_res.get("qr_content") or 
                 data_res.get("qris_content") or 
@@ -185,7 +258,6 @@ def process_generate_qris(call):
                 data_res.get("image")
             )
             
-            # Konversi nominal secara aman
             raw_amount = data_res.get("total_amount") or data_res.get("amount") or PRICE_VIP
             try:
                 total_amount = int(float(str(raw_amount)))
@@ -198,15 +270,23 @@ def process_generate_qris(call):
                 "⏱️ <i>Sistem akan memverifikasi pembayaran secara otomatis. Setelah terbayar, link 11 grup VIP akan langsung dikirimkan ke sini!</i>"
             )
             
+            sent_msg = None
             if qr_content:
-                # Membuat file gambar di memori agar aman dikirim ke Telegram
                 qr_photo_stream = generate_qr_stream(str(qr_content))
-                bot.send_photo(chat_id, qr_photo_stream, caption=caption_text, parse_mode="HTML")
+                sent_msg = bot.send_photo(chat_id, qr_photo_stream, caption=caption_text, parse_mode="HTML")
             else:
                 direct_url = data_res.get("direct_url") or data_res.get("checkout_url") or ""
-                bot.send_message(chat_id, f"{caption_text}\n\n🔗 <b>Link Pembayaran:</b> {direct_url}", parse_mode="HTML")
+                sent_msg = bot.send_message(chat_id, f"{caption_text}\n\n🔗 <b>Link Pembayaran:</b> {direct_url}", parse_mode="HTML")
 
             bot.answer_callback_query(call.id)
+            
+            # MENGAKTIFKAN Pengecekan Otomatis via Background Thread
+            if sent_msg:
+                threading.Thread(
+                    target=check_payment_loop,
+                    args=(chat_id, order_id, sent_msg.message_id),
+                    daemon=True
+                ).start()
             
         else:
             error_msg = res_data.get("message", "Gagal memproses QRIS.")
